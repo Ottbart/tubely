@@ -1,11 +1,16 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -48,13 +53,18 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer file.Close()
 
-	mediaType := header.Header.Get("Content-Type")
-	data, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Unable to read file data", err)
-		return
-	}
+	// check the media type of the file
+	contentType := header.Header.Get("Content-Type")
 
+	/*
+		data, err := io.ReadAll(file)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Unable to read file data", err)
+			return
+		}
+	*/
+
+	// check if the user is the owner of the video
 	meta, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to get video ID from database", err)
@@ -65,11 +75,41 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	//thumbUrl := "http://localhost:" + cfg.port + "/api/thumbnails/" + videoID.String()
-	base64Url := base64.StdEncoding.EncodeToString(data)
-	dataUrl := "data:" + mediaType + ";base64:" + base64Url
-	meta.ThumbnailURL = &dataUrl
+	// check extension of the file
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "invalid file extension", err)
+		return
+	}
+	if mediaType != "image/jpeg" && mediaType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Invalid file type. Only JPEG and PNG are allowed", nil)
+		return
+	}
 
+	// build the path to save the file
+	extension := strings.Split(mediaType, "/")
+	randKey := make([]byte, 32)
+	if _, err := rand.Read(randKey); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error generating filename: ", err)
+		return
+	}
+	filename := base64.RawURLEncoding.EncodeToString(randKey) + "." + extension[1]
+	thumbnailPath := filepath.Join(cfg.assetsRoot, filename)
+	localFile, err := os.Create(thumbnailPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error creating file: ", err)
+		return
+	}
+	defer localFile.Close()
+
+	// write the file to disk
+	if _, err := io.Copy(localFile, file); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error writing file", err)
+		return
+	}
+	// update the video metadata with the thumbnail path and save it to the database
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/%s", cfg.port, thumbnailPath)
+	meta.ThumbnailURL = &thumbnailURL
 	if err := cfg.db.UpdateVideo(meta); err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to update video", err)
 		return
