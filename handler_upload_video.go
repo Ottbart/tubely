@@ -85,10 +85,28 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "error storing local copy of file: ", err)
 		return
 	}
-	_, err = localFile.Seek(0, io.SeekStart)
+
+	//process for fast start and discard old version
+	processedPath, err := processVideoForFastStart(localFile.Name())
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "error setting temp file offset: ", err)
+		respondWithError(w, http.StatusInternalServerError, "error processing fast start: ", err)
 		return
+	}
+	processedFile, err := os.Open(processedPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "error opening rocessed file: ", err)
+		return
+	}
+	defer os.Remove(processedFile.Name())
+	defer processedFile.Close()
+
+	//check aspect ratio
+	prefix := "other/"
+	aspectRatio, err := getVideoAspectRatio(localFile.Name())
+	if aspectRatio == "16:9" {
+		prefix = "landscape/"
+	} else if aspectRatio == "9:16" {
+		prefix = "portrait/"
 	}
 
 	//give the file a name
@@ -98,13 +116,13 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "error generating filename: ", err)
 		return
 	}
-	filename := hex.EncodeToString(randKey) + extension
+	filename := prefix + hex.EncodeToString(randKey) + extension
 
 	//put object into S3
 	putObject := s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
 		Key:         aws.String(filename),
-		Body:        localFile,
+		Body:        processedFile,
 		ContentType: &mediaType,
 	}
 	_, err = cfg.s3Client.PutObject(r.Context(), &putObject)
